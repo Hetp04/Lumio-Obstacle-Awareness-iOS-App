@@ -1,6 +1,6 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Jaehoonoo/Lumio)
 
-# YOLO Streaming Demo (Server + Local Webcam Client + Browser Client)
+# Lumio 
 
 ## Overview
 
@@ -36,17 +36,3 @@
    - Open `web_client.html` in a browser **over HTTPS** or via `python -m http.server` and visit `http://localhost:8000` (adjust for your static server).
    - Click **Connect** (allow camera). It will stream frames to `ws://127.0.0.1:8000/ws` by default—change the field to your server URL if remote.
 
-## Notes
-
-- Protocol: client sends **TEXT JSON meta** then **BINARY JPEG**; server replies **TEXT JSON** with detections.
-- Tweak `JPEG_QUALITY` and `TARGET_FPS` on the clients for bandwidth/latency tradeoffs.
-- For GPU inference, install CUDA-compatible PyTorch and Ultralytics as per their docs.
-- Security: this is a demo—add authentication, rate limiting, and TLS for production.
-- iPhone: use **web_client.html** in Mobile Safari; frame sizes and FPS should be lowered for stability.
-
-## Files
-
-- `server.py`
-- `client.py`
-- `web_client.html`
-- `requirements.txt`
