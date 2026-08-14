@@ -1,4 +1,3 @@
-# server.py
 import json, time, math
 from typing import List, Dict, Any, Tuple
 import cv2, numpy as np
@@ -7,12 +6,9 @@ from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from ultralytics import YOLO
-from deep_sort_realtime.deepsort_tracker import DeepSort  # <-- DeepSORT
+from deep_sort_realtime.deepsort_tracker import DeepSort
 import torch
 
-# -----------------------------
-# Small utilities
-# -----------------------------
 def bbox_to_center(b: np.ndarray) -> Tuple[float,float,float,float]:
     w = max(1.0, b[2] - b[0]); h = max(1.0, b[3] - b[1])
     cx = b[0] + 0.5 * w; cy = b[1] + 0.5 * h
@@ -26,11 +22,7 @@ def rect_overlap(a, b) -> bool:
     x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
     return (x2 - x1) > 0 and (y2 - y1) > 0
 
-# -----------------------------
-# Constant-velocity Kalman (center x,y)
-# -----------------------------
 class KalmanCV2D:
-    # State: [x, y, vx, vy]^T ; Measurement: [x, y]^T
     def __init__(self, dt=0.1, proc_var=5.0, meas_var=25.0):
         self.dt = dt
         self.F = np.array([[1,0,dt,0],[0,1,0,dt],[0,0,1,0],[0,0,0,1]], dtype=np.float32)
@@ -64,9 +56,6 @@ class KalmanCV2D:
         self.P = (I - K @ self.H) @ self.P
         return self.x.copy(), self.P.copy()
 
-# -----------------------------
-# App + models + trackers
-# -----------------------------
 app = FastAPI(title="YOLO + DeepSORT + KF predictions (WebSocket)")
 
 app.add_middleware(
@@ -79,26 +68,21 @@ print(f"Using device: {DEVICE}")
 MODEL_PATH = "yolov8n.pt"
 model = YOLO(MODEL_PATH).to(DEVICE)
 
-# Warm up (download weights on first run)
 _dummy = np.zeros((640, 640, 3), dtype=np.uint8)
 _ = model.predict(source=_dummy, imgsz=640, conf=0.25, verbose=False)
 
-# DeepSORT tracker
-# embedder options: "mobilenet" (OpenCV dnn), "torchreid" (heavier, best re-id), None (IoU only)
 deepsort = DeepSort(
     max_age=30,
     n_init=3,
     nms_max_overlap=0.7,
     max_cosine_distance=0.4,
-    embedder="mobilenet",          # good hackathon default
-    bgr=True,                      # frames are BGR (OpenCV)
-    embedder_gpu=(DEVICE == 'cuda')             # set True if you want to push embedder to GPU (torch needed)
+    embedder="mobilenet",
+    bgr=True,
+    embedder_gpu=(DEVICE == 'cuda')
 )
 
-# Per-track Kalman store {track_id: (KF, (w,h))}
 track_kf: Dict[int, Tuple[KalmanCV2D, Tuple[float,float]]] = {}
 
-# Prediction horizon and zone
 PREDICT_K = 10
 ZONE_Y1, ZONE_Y2 = 0.60, 1.00
 ZONE_X1, ZONE_X2 = 0.20, 0.80
@@ -132,7 +116,7 @@ async def ws_endpoint(websocket: WebSocket):
             t0 = time.time()
             yolo_out = model.predict(source=frame, imgsz=640, conf=0.25, verbose=False)
 
-            dets = []  # each: [ [x1,y1,x2,y2], conf, class_id ]
+            dets = []
             names = None
             for r in yolo_out:
                 names = r.names
@@ -141,22 +125,18 @@ async def ws_endpoint(websocket: WebSocket):
                 for b in r.boxes:
                     xyxy = b.xyxy[0].tolist()
                     x1, y1, x2, y2 = map(float, xyxy)
-                    # clamp
                     x1 = max(0.0, min(x1, w-1)); y1 = max(0.0, min(y1, h-1))
                     x2 = max(0.0, min(x2, w-1)); y2 = max(0.0, min(y2, h-1))
                     conf = float(b.conf[0]) if b.conf is not None else 0.0
                     cls_id = int(b.cls[0]) if b.cls is not None else -1
                     dets.append(([x1, y1, x2, y2], conf, cls_id))
 
-            # Update DeepSORT
-            tracks = deepsort.update_tracks(dets, frame=frame)  # returns list of Track objects
+            tracks = deepsort.update_tracks(dets, frame=frame)
 
-            # adapt KF dt to actual frame interval
             now = time.time()
             dt = max(1e-3, now - last_ts)
             last_ts = now
 
-            # Zone rectangle
             zx1 = int(ZONE_X1 * w); zx2 = int(ZONE_X2 * w)
             zy1 = int(ZONE_Y1 * h); zy2 = int(ZONE_Y2 * h)
             zone_rect = np.array([zx1, zy1, zx2, zy2], dtype=np.int32)
@@ -166,29 +146,25 @@ async def ws_endpoint(websocket: WebSocket):
             for trk in tracks:
                 if not trk.is_confirmed():
                     continue
-                tlbr = trk.to_tlbr()  # [x1,y1,x2,y2]
+                tlbr = trk.to_tlbr()
                 bx = np.array(tlbr, dtype=np.float32)
                 cx, cy, bw, bh = bbox_to_center(bx)
 
-                # label/conf if available
                 label = str(trk.get_det_class()) if hasattr(trk, "get_det_class") else "obj"
 
                 det_conf = getattr(trk, "det_conf", 1.0)
                 conf = float(det_conf) if det_conf is not None else 0.0
 
-                # Maintain per-ID KF
                 if trk.track_id not in track_kf:
                     kf = KalmanCV2D(dt=dt, proc_var=5.0, meas_var=25.0)
                     kf.init(cx, cy)
                     track_kf[trk.track_id] = (kf, (bw, bh))
                 kf, (pw, ph) = track_kf[trk.track_id]
                 kf.set_dt(dt)
-                # predict then update with current center
                 kf.predict()
                 kf.update(np.array([cx, cy], dtype=np.float32))
-                track_kf[trk.track_id] = (kf, (bw, bh))  # store latest size
+                track_kf[trk.track_id] = (kf, (bw, bh))
 
-                # Build future predictions by simulating K predicts on a copy
                 preds = []
                 x_save, P_save = kf.x.copy(), kf.P.copy()
                 for _ in range(PREDICT_K):
@@ -196,10 +172,8 @@ async def ws_endpoint(websocket: WebSocket):
                     pcx, pcy = float(pred_x[0,0]), float(pred_x[1,0])
                     pb = center_to_bbox(pcx, pcy, bw, bh).astype(int)
                     preds.append(pb.tolist())
-                # restore state (we only predicted "virtually")
                 kf.x, kf.P = x_save, P_save
 
-                # Zone crossing / priority
                 crosses = any(rect_overlap(p, zone_rect) for p in preds)
                 area = (bx[2]-bx[0]) * (bx[3]-bx[1])
                 near = area >= 0.08 * (w*h)
@@ -238,4 +212,3 @@ async def ws_endpoint(websocket: WebSocket):
         except Exception:
             pass
         raise
-

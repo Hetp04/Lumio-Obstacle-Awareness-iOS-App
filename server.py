@@ -1,7 +1,3 @@
-
-# server.py
-# FastAPI + WebSocket YOLO inference server
-# Usage: python -m uvicorn server:app --host 0.0.0.0 --port 8000
 import json
 import asyncio
 from typing import List, Dict, Any
@@ -21,7 +17,6 @@ except Exception as e:
 
 app = FastAPI(title="YOLO Streaming Inference Server")
 
-# Optional CORS (not strictly needed for WS, but fine to enable for future REST endpoints)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,7 +25,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load a small model by default; change to yolov8s.pt or a custom .pt if desired
 MODEL_PATH = "yolo11n.pt"
 model = YOLO(MODEL_PATH)
 
@@ -52,7 +46,6 @@ async def ws_endpoint(websocket: WebSocket):
             except WebSocketDisconnect:
                 break
             except Exception:
-                # If the client sent binary when we expected text, consume and continue
                 data_maybe = await websocket.receive()
                 continue
 
@@ -64,7 +57,6 @@ async def ws_endpoint(websocket: WebSocket):
 
             frame_id = meta.get("frame_id", None)
 
-            # Receive the binary JPEG frame
             msg = await websocket.receive()
             if "bytes" not in msg:
                 await websocket.send_text(json.dumps({"frame_id": frame_id, "error": "expected_binary_frame"}))
@@ -77,7 +69,6 @@ async def ws_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"frame_id": frame_id, "error": "decode_failed"}))
                 continue
 
-            # Run YOLO inference
             t0 = time.time()
             results = model.predict(source=frame, imgsz=640, conf=0.25, verbose=False)
             logging.info("Inference %.2f ms, frame_id=%s, shape=%s",
@@ -108,10 +99,8 @@ async def ws_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        # Best-effort error message to client
         try:
             await websocket.send_text(json.dumps({"error": str(e)}))
         except Exception:
             pass
         raise
-

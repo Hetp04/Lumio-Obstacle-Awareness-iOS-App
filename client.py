@@ -1,21 +1,17 @@
-# client.py
-# Laptop webcam demo client.
-# Connects to ws://<SERVER_HOST>:8000/ws, streams JPEG frames, draws returned boxes locally.
 import json
 import time
 import cv2
 import numpy as np
 
 try:
-    import websocket  # from websocket-client
+    import websocket
 except Exception as e:
     raise RuntimeError("Install websocket-client: pip install websocket-client") from e
 
-SERVER_WS_URL = "wss://metabolism-loc-kissing-spam.trycloudflare.com/ws"  # change to your server's IP/port
+SERVER_WS_URL = "wss://metabolism-loc-kissing-spam.trycloudflare.com/ws"
 CAMERA_INDEX = 0
 JPEG_QUALITY = 75
 TARGET_FPS = 20
-
 
 def draw_detections(img, dets):
     for d in dets:
@@ -35,7 +31,6 @@ def draw_detections(img, dets):
         )
     return img
 
-
 def main():
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -43,8 +38,8 @@ def main():
 
     ws = websocket.create_connection(
         SERVER_WS_URL,
-        timeout=30,  # was 10
-        ping_interval=20,  # keep-alive
+        timeout=30,
+        ping_interval=20,
         ping_timeout=10,
     )
     print("Connected to server:", SERVER_WS_URL)
@@ -58,7 +53,6 @@ def main():
             if not ret:
                 break
 
-            # JPEG encode for network efficiency
             ok, enc = cv2.imencode(
                 ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
             )
@@ -66,11 +60,9 @@ def main():
                 continue
             jpg_bytes = enc.tobytes()
 
-            # Send metadata then frame
             ws.send(json.dumps({"frame_id": frame_id}))
             ws.send_binary(jpg_bytes)
 
-            # Receive detection results
             msg = ws.recv()
             resp = json.loads(msg)
 
@@ -83,7 +75,6 @@ def main():
 
             frame_id += 1
 
-            # Simple FPS control
             elapsed = time.time() - prev
             target = 1.0 / TARGET_FPS
             if elapsed < target:
@@ -93,7 +84,6 @@ def main():
         ws.close()
         cap.release()
         cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()

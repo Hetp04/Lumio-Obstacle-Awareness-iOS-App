@@ -8,13 +8,10 @@ from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from ultralytics import YOLO
-from boxmot import DeepOcSort  # Use DeepOcSort as specified
+from boxmot import DeepOcSort
 from pathlib import Path
 import torch
 
-# =========================
-# Utility helpers (No changes needed)
-# =========================
 def clamp_box_xyxy(b, w, h):
     x1, y1, x2, y2 = b
     x1 = max(0.0, min(float(x1), w - 1))
@@ -44,9 +41,8 @@ def xyxy_from_xysr(x, y, s, r):
     return [x1, y1, x2, y2]
 
 def predicted_point_overlaps_zone(center_point, estimated_width, zone_rect):
-    # ... (Keep this function as defined previously) ...
     px, py = center_point
-    radius = estimated_width / 2.0 # Approximate radius
+    radius = estimated_width / 2.0
     rx1, ry1, rx2, ry2 = zone_rect
     closest_x = max(rx1, min(px, rx2))
     closest_y = max(ry1, min(py, ry2))
@@ -55,9 +51,6 @@ def predicted_point_overlaps_zone(center_point, estimated_width, zone_rect):
     distance_squared = (distance_x ** 2) + (distance_y ** 2)
     return distance_squared < (radius ** 2)
 
-# =========================
-# App + models + tracker
-# =========================
 ALLOWED_CLASSES = {
     1: u"person",
     2: u'bicycle',
@@ -69,7 +62,6 @@ ALLOWED_CLASSES = {
     9: u'boat',
     10: u'traffic light',
     11: u'fire hydrant',
-    # stop sign?
     12: u'stop sign',
     13: u'parking meter',
     14: u'bench',
@@ -89,10 +81,9 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-# Detector
 YOLO_WEIGHTS = "yolo11m.pt"
-YOLO_CONF = 0.5 # Define confidence threshold
-YOLO_IMG_SZ = 640 # Define image size
+YOLO_CONF = 0.5
+YOLO_IMG_SZ = 640
 
 try:
     model = YOLO(YOLO_WEIGHTS)
@@ -100,7 +91,6 @@ except Exception:
     print(f"Could not load {YOLO_WEIGHTS}, falling back to yolov8n.pt")
     model = YOLO("yolov8n.pt") 
 
-# Warmup to trigger weight load
 _dummy = np.zeros((YOLO_IMG_SZ, YOLO_IMG_SZ, 3), dtype=np.uint8)
 _ = model.predict(_dummy, imgsz=YOLO_IMG_SZ, conf=YOLO_CONF, verbose=False)
 print("Model loaded and warmed up.")
@@ -114,8 +104,7 @@ def make_tracker():
         max_age=10,
     )
 
-# Prediction horizon + zone config
-PREDICT_K = 10   # future steps to simulate from KF
+PREDICT_K = 10
 ZONE_Y1, ZONE_Y2 = 0.60, 1.00
 ZONE_X1, ZONE_X2 = 0.20, 0.80
 
@@ -147,27 +136,18 @@ async def ws_endpoint(websocket: WebSocket):
             h, w = frame.shape[:2]
             t0 = time.time()
             
-            # FIX: Pass consistent parameters to the model
             yres = model(
                 frame, 
                 verbose=False, 
                 conf=YOLO_CONF, 
-                # imgsz=YOLO_IMG_SZ
             )
             
-            # FIX: Efficiently get detections as a single NumPy array
-            # This replaces the manual for-loop
             if yres and hasattr(yres[0], "boxes") and len(yres[0].boxes.data) > 0:
-                dets = yres[0].boxes.data.cpu().numpy() # [x1, y1, x2, y2, conf, cls]
-                # Ensure it's a contiguous float32 array as required by boxmot
+                dets = yres[0].boxes.data.cpu().numpy()
                 dets = np.ascontiguousarray(dets, dtype=np.float32)
             else:
                 dets = np.empty((0, 6), dtype=np.float32)
 
-
-            # -------------------
-            # 2) Update tracker
-            # -------------------
             current_tracks_data = tracker.update(dets, frame)
             
             zx1 = int(ZONE_X1 * w); zx2 = int(ZONE_X2 * w)
@@ -190,18 +170,15 @@ async def ws_endpoint(websocket: WebSocket):
                 print('determined class',trk.cls)
                 predicted_class = int(trk.cls) + 1
                 if predicted_class not in ALLOWED_CLASSES:
-                    # skip predictions for these
                     continue
 
                 x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
 
                 bbox_now = clamp_box_xyxy([x1, y1, x2, y2], w, h)
-                x1, y1, x2, y2 = map(int, bbox_now) # Re-assign after clamping
+                x1, y1, x2, y2 = map(int, bbox_now)
 
                 track_id = int(getattr(trk, "id", getattr(trk, "track_id", -1)))
                 
-                # FIX: Safely handle NoneType for confidence
-                # This prevents the TypeError we discussed previously.
                 det_conf_val = getattr(trk, "det_conf", 1.0)
                 conf = float(det_conf_val) if det_conf_val is not None else 0.0
 
@@ -216,35 +193,30 @@ async def ws_endpoint(websocket: WebSocket):
 
                 if hasattr(trk, "kf") and hasattr(trk.kf, "x") and hasattr(trk.kf, "P"):
                     current_mean = trk.kf.x.copy()
-                    if len(current_mean) >= 6: # Check if state includes velocity
+                    if len(current_mean) >= 6:
                         current_center_x = float(current_mean[0])
                         current_center_y = float(current_mean[1])
                         vx = float(current_mean[4])
                         vy = float(current_mean[5])
 
-                        # Determine direction based on current velocity
-                        velocity_threshold = 1.0 # Pixels per frame threshold
+                        velocity_threshold = 1.0
                         if vx > velocity_threshold: 
                             direction = "right"
                         elif vx < -velocity_threshold: 
                             direction = "left"
                         else: 
-                            direction = "straight" # Simplified horizontal direction
+                            direction = "straight"
                     
                     X0, P0 = trk.kf.x.copy(), trk.kf.P.copy()
 
-                    # FIX: Use the PREDICT_K constant, not a magic number (30)
                     for _ in range(PREDICT_K): 
                         trk.kf.predict()
                         current_mean = trk.kf.x.copy()
                         current_cov = trk.kf.P.copy()
 
-                        # Extract center position (x, y) from state vector
-                        # For DeepOcSort: state is [x, y, s, r, vx, vy, vs]
                         pred_x = int(trk.kf.x[0])
                         pred_y = int(trk.kf.x[1])
 
-                        # Clamp to frame boundaries
                         pred_x = max(0, min(frame.shape[1], pred_x))
                         pred_y = max(0, min(frame.shape[0], pred_y))
 
@@ -255,25 +227,20 @@ async def ws_endpoint(websocket: WebSocket):
                         pred_path.append((pred_x, pred_y))
                         pred_widths.append(pred_w)
 
-                    # restore KF state
                     trk.kf.x, trk.kf.P = X0, P0
 
-                # --- Refined Prioritization Logic ---
                 crosses = False
                 soon = False
                 first_cross_step = -1
-                moving_towards_zone = False # New flag based on velocity
+                moving_towards_zone = False
 
-                # Check if currently moving towards the zone
-                # (only if the object is currently outside the zone horizontally)
-                if current_center_x < zx1 and vx > 0: # Left of zone, moving right
+                if current_center_x < zx1 and vx > 0:
                     moving_towards_zone = True
-                elif current_center_x > zx2 and vx < 0: # Right of zone, moving left
+                elif current_center_x > zx2 and vx < 0:
                     moving_towards_zone = True
-                elif zx1 <= current_center_x <= zx2: # Already inside zone horizontally
-                        moving_towards_zone = True # Treat as moving towards/within
+                elif zx1 <= current_center_x <= zx2:
+                        moving_towards_zone = True
 
-                # Check predicted path overlap
                 for i in range(len(pred_path)):
                         point = pred_path[i]
                         est_width = pred_widths[i] if i < len(pred_widths) else (bbox_now[2]-bbox_now[0])
@@ -283,21 +250,17 @@ async def ws_endpoint(websocket: WebSocket):
                             if i < 5: soon = True
                             if soon: break
 
-                # Nearness check (same as before)
                 area = max(1, (bbox_now[2] - bbox_now[0]) * (bbox_now[3] - bbox_now[1]))
                 near = area >= 0.08 * (w * h)
 
-                # --- Assign Priority using Velocity ---
-                priority = "none" # Default to none
+                priority = "none"
                 if crosses:
                     if near and soon and moving_towards_zone:
                         priority = "high"
                     elif soon and moving_towards_zone:
                             priority = "medium"
-                    elif moving_towards_zone: # Crosses eventually, moving towards
+                    elif moving_towards_zone:
                             priority = "low"
-                    # else: # Crosses but moving away -> priority remains "none"
-                    # --- End Priority Assignment ---
 
                 out_tracks.append({
                     "id": track_id,
@@ -307,13 +270,11 @@ async def ws_endpoint(websocket: WebSocket):
                     "pred_path": pred_path,
                     "priority": priority,
 
-                    "direction": direction, # Add the calculated direction
-                    "vx": round(vx, 2),     # Optional: send velocity values
-                    "vy": round(vy, 2)      # Optional: send velocity values
+                    "direction": direction,
+                    "vx": round(vx, 2),
+                    "vy": round(vy, 2)
                 })
             
-            # This print is helpful for debugging
-            # print(f'Frame {frame_id}: Found {len(out_tracks)} tracks.')
             
             resp = {
                 "frame_id": frame_id,
@@ -329,7 +290,6 @@ async def ws_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"An error occurred: {e}")
         try:
-            # Try to send a final error message
             await websocket.send_text(json.dumps({"error": str(e)}))
         except Exception:
-            pass # Connection might be closed already
+            pass
